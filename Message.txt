@@ -1,0 +1,9 @@
+Message<T>:
+    Header: [fixed size]
+      - T Id (enum class) 
+      - Size (bytes)
+    Body: (0 or more bytes)
+
+We can use int id, but in that case we have the problem to use incorrect id. For example we have 0,1,2, but send message with 
+id = 5 or 10 or 154533. We will use enum class to validate id. But we want to give our users to ability to create their own
+types of messages, (their own id), cause we don't know how many of types they needs. So we will use the templates.
