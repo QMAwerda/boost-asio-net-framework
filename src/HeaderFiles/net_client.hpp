@@ -26,16 +26,18 @@ public:
   // Connect to server with hostname/ip-address and port
   bool Connect(const std::string &host, const uint16_t port) {
     try {
-      // Create connection
-      m_connection = std::make_unique<connection<T>>(); // TODO
-
       // Resolve hostname/ip-address into tangiable physical address
       boost::asio::ip::tcp::resolver resolver(m_context);
-      auto m_endpoints = resolver.resolve(
+      boost::asio::ip::tcp::resolver::results_type endpoints = resolver.resolve(
           host, std::to_string(port)); // he hasn't auto or smth else
 
+      // Create connection
+      m_connection = std::make_unique<connection<T>>(
+          connection<T>::owner::client, m_context,
+          boost::asio::ip::tcp::socket(m_context), m_qMessagesIn);
+
       // Tell the connection object to connet to server
-      m_connection->ConnectToServer(m_endpoints);
+      m_connection->ConnectToServer(endpoints);
 
       // Start Context Thread
       thrContext = std::thread([this]() { m_context.run(); });
@@ -73,12 +75,19 @@ public:
       return false;
   }
 
+  // Send message to server
+  void Send(const message<T> &msg) {
+    if (IsConnected())
+      m_connection->Send(msg);
+  }
+
   // Retrieve queue of messages from server
   tsqueue<owned_message<T>> &Incoming() { return m_qMessagesIn; }
 
 protected:
   // Asio context handles the data transfer...
-  boost::asio::io_context m_context;
+  boost::asio::io_context m_context; // m_ prefix mean variable-member of class
+                                     // it's best practise to code style
   // ...but needs a thread of its own to excecute its work commands
   std::thread thrContext;
   // This is the hardware socket that is connected to the server

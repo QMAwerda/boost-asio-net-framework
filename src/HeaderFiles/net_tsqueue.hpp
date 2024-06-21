@@ -49,7 +49,7 @@ public:
   // Returns number of items in Queue
   size_t count() {
     std::scoped_lock lock(muxQueue);
-    deqQueue.size();
+    return deqQueue.size();
   }
 
   // Clears Queue

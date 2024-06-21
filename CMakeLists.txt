@@ -11,6 +11,9 @@ add_library(${PROJECT_NAME} STATIC
     src/HeaderFiles/net_message.hpp 
     src/HeaderFiles/olc_net.hpp
     src/HeaderFiles/net_tsqueue.hpp
+    src/HeaderFiles/net_server.hpp
+    src/HeaderFiles/net_client.hpp
+    src/HeaderFiles/net_connection.hpp
 
     src/SourceFiles/empty.cpp
 )

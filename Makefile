@@ -23,7 +23,7 @@ build_release/Makefile:
 dist-clean:
 	@rm -rf build
 
-.PHONY: build
+.PHONY: build # error 'can't load cache' need to fix that buid, made it manually again
 build:
 	@mkdir -p build
 	@cd build && \
