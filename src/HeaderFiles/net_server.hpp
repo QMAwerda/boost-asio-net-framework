@@ -4,26 +4,32 @@
 #include "net_connection.hpp"
 #include "net_message.hpp"
 #include "net_tsqueue.hpp"
-#include <boost/asio/io_context.hpp>
-#include <exception>
-#include <memory>
 
 namespace olc {
 namespace net {
 template <typename T> class server_interface {
 public:
-  // 16 bit integer = 2 bytes [-32767, +32767]
+  // Create a server, ready to listen on specified port
   server_interface(uint16_t port)
       : m_asioAcceptor(m_asioContext, boost::asio::ip::tcp::endpoint(
                                           boost::asio::ip::tcp::v4(), port)) {}
 
-  virtual ~server_interface() { Stop(); }
+  virtual ~server_interface() {
+    // May as well try and tidy up
+    Stop();
+  }
 
+  // Starts the server!
   bool Start() {
     try {
-      WaitForClientConnection(); // we give work for asio, so it won't stop
-                                 // before the running the context
+      // Issue a task to the asio context - This is important
+      // as it will prime the context with "work", and stop it
+      // from exiting immediately. Since this is a server, we
+      // want it primed ready to handle clients trying to
+      // connect.
+      WaitForClientConnection();
 
+      // Launch the asio context in its own thread
       m_threadContext = std::thread([this]() { m_asioContext.run(); });
     } catch (std::exception &e) {
       // Something prohibited the server from listening
@@ -35,14 +41,14 @@ public:
     return true;
   }
 
+  // Stops the server!
   void Stop() {
     // Request the context to close
     m_asioContext.stop();
 
     // Tidy up the context thread
     if (m_threadContext.joinable())
-      m_threadContext
-          .join(); // we will wait the stop of the context on the thread
+      m_threadContext.join();
 
     // Inform someone, anybody, if they care...
     std::cout << "[SERVER] Stopped!\n";
@@ -50,12 +56,18 @@ public:
 
   // ASYNC - Instruct asio to wait for connection
   void WaitForClientConnection() {
+    // Prime context with an instruction to wait until a socket connects. This
+    // is the purpose of an "acceptor" object. It will provide a unique socket
+    // for each incoming connection attempt
     m_asioAcceptor.async_accept([this](std::error_code ec,
                                        boost::asio::ip::tcp::socket socket) {
+      // Triggered by incoming connection request
       if (!ec) {
-        std::cout << "[SERVER] New Conntection: " << socket.remote_endpoint()
+        // Display some useful(?) information
+        std::cout << "[SERVER] New Connection: " << socket.remote_endpoint()
                   << "\n";
 
+        // Create a new connection to handle this client
         std::shared_ptr<connection<T>> newconn =
             std::make_shared<connection<T>>(connection<T>::owner::server,
                                             m_asioContext, std::move(socket),
@@ -66,35 +78,46 @@ public:
           // Connection allowed, so add to container of new connections
           m_deqConnections.push_back(std::move(newconn));
 
+          // And very important! Issue a task to the connection's
+          // asio context to sit and wait for bytes to arrive!
           m_deqConnections.back()->ConnectToClient(nIDCounter++);
 
           std::cout << "[" << m_deqConnections.back()->GetID()
                     << "] Connection Approved\n";
         } else {
           std::cout << "[-----] Connection Denied\n";
-          // if the connection denied, than it will go out of scope and deleted
-          // (cause smart ptr)
-        }
 
+          // Connection will go out of scope with no pending tasks, so will
+          // get destroyed automagically due to the wonder of smart pointers
+        }
       } else {
-        // Error has occured during acceptance
+        // Error has occurred during acceptance
         std::cout << "[SERVER] New Connection Error: " << ec.message() << "\n";
       }
 
-      // Prime the asio context with more work - again simply wait for another
-      // connection...
-      WaitForClientConnection(); // re-register another async task to asio
+      // Prime the asio context with more work - again simply wait for
+      // another connection...
+      WaitForClientConnection();
     });
   }
 
   // Send a message to a specific client
   void MessageClient(std::shared_ptr<connection<T>> client,
                      const message<T> &msg) {
+    // Check client is legitimate...
     if (client && client->IsConnected()) {
+      // ...and post the message via the connection
       client->Send(msg);
     } else {
+      // If we cant communicate with client then we may as
+      // well remove the client - let the server know, it may
+      // be tracking it somehow
       OnClientDisconnect(client);
-      client.reset(); // When this client will be deleted?
+
+      // Off you go now, bye bye!
+      client.reset();
+
+      // Then physically remove it from the container
       m_deqConnections.erase(
           std::remove(m_deqConnections.begin(), m_deqConnections.end(), client),
           m_deqConnections.end());
@@ -102,12 +125,12 @@ public:
   }
 
   // Send message to all clients
-  // ignore a specific client
   void
   MessageAllClients(const message<T> &msg,
                     std::shared_ptr<connection<T>> pIgnoreClient = nullptr) {
     bool bInvalidClientExists = false;
 
+    // Iterate through all clients in container
     for (auto &client : m_deqConnections) {
       // Check client is connected...
       if (client && client->IsConnected()) {
@@ -115,24 +138,36 @@ public:
         if (client != pIgnoreClient)
           client->Send(msg);
       } else {
+        // The client couldnt be contacted, so assume it has
+        // disconnected.
         OnClientDisconnect(client);
         client.reset();
+
+        // Set this flag to then remove dead clients from container
         bInvalidClientExists = true;
       }
     }
 
-    if (bInvalidClientExists) {
+    // Remove dead clients, all in one go - this way, we dont invalidate the
+    // container as we iterated through it.
+    if (bInvalidClientExists)
       m_deqConnections.erase(std::remove(m_deqConnections.begin(),
                                          m_deqConnections.end(), nullptr),
                              m_deqConnections.end());
-    }
   }
 
-  void Update(size_t nMaxMessages = -1) {
+  // Force server to respond to incoming messages
+  void Update(size_t nMaxMessages = -1, bool bWait = false) {
+    if (bWait)
+      m_qMessagesIn.wait();
+
+    // Process as many messages as you can up to the value
+    // specified
     size_t nMessageCount = 0;
     while (nMessageCount < nMaxMessages && !m_qMessagesIn.empty()) {
       // Grab the front message
       auto msg = m_qMessagesIn.pop_front();
+
       // Pass to message handler
       OnMessage(msg.remote, msg.msg);
 
@@ -141,6 +176,9 @@ public:
   }
 
 protected:
+  // This server class should override thse functions to implement
+  // customised functionality
+
   // Called when a client connects, you can veto the connection by returning
   // false
   virtual bool OnClientConnect(std::shared_ptr<connection<T>> client) {
@@ -151,7 +189,6 @@ protected:
   virtual void OnClientDisconnect(std::shared_ptr<connection<T>> client) {}
 
   // Called when a message arrives
-  // allow server to deal with message from a specific client
   virtual void OnMessage(std::shared_ptr<connection<T>> client,
                          message<T> &msg) {}
 
@@ -162,15 +199,15 @@ protected:
   // Container of active validated connections
   std::deque<std::shared_ptr<connection<T>>> m_deqConnections;
 
-  // Order of declaration is important - it is also the order if initialisation
-  boost::asio::io_context
-      m_asioContext; // it's shared across all of the connected clients
+  // Order of declaration is important - it is also the order of initialisation
+  boost::asio::io_context m_asioContext;
   std::thread m_threadContext;
 
   // These things need an asio context
-  boost::asio::ip::tcp::acceptor m_asioAcceptor;
+  boost::asio::ip::tcp::acceptor
+      m_asioAcceptor; // Handles new incoming connection attempts...
 
-  // Client will be identified in the "wider system" via an ID
+  // Clients will be identified in the "wider system" via an ID
   uint32_t nIDCounter = 10000;
 };
 } // namespace net
