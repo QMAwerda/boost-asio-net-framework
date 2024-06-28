@@ -77,8 +77,16 @@ public:
 
   void wait() {
     while (empty()) {
-      std::unique_lock<std::mutex> ul(muxBlocking);
-      cvBlocking.wait(ul);
+      std::unique_lock<std::mutex> ul(
+          muxBlocking); // make muxBlocking common mux for all threads, create
+                        // 'ul' variable
+      cvBlocking.wait(
+          ul); // all threads that will get to that function will wait until we
+               // won't unlock our muxBlockong mutex, but our first thread, that
+               // already took the muxBlocking,
+      // it will unlock in the notify_one() function. And after that, that first
+      // thread will work, and others threads will wait releasing the
+      // muxBlocking.
     }
   }
 

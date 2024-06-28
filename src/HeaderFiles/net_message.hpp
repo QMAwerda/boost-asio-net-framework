@@ -4,7 +4,6 @@
 
 namespace olc {
 namespace net {
-///[OLC_HEADERIFYIER] START "MESSAGE"
 
 // Message Header is sent at start of all messages. The template allows us
 // to use "enum class" to ensure that the messages are valid at compile time
@@ -106,6 +105,5 @@ template <typename T> struct owned_message {
   }
 };
 
-///[OLC_HEADERIFYIER] END "MESSAGE"
 } // namespace net
 } // namespace olc

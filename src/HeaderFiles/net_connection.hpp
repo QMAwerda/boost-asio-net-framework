@@ -6,6 +6,9 @@
 
 namespace olc {
 namespace net {
+// Forward declare
+template <typename T> class server_interface;
+
 template <typename T>
 class connection : public std::enable_shared_from_this<connection<T>> {
 public:
@@ -22,6 +25,21 @@ public:
       : m_asioContext(asioContext), m_socket(std::move(socket)),
         m_qMessagesIn(qIn) {
     m_nOwnerType = parent;
+
+    if (parent == owner::server) {
+      // Connection is Server -> Client, construct random data for the client
+      // to transform and send back for validation
+      m_nHandshakeOut = uint64_t(std::chrono::system_clock::now()
+                                     .time_since_epoch()
+                                     .count()); // miliseconds
+
+      // Pre-calculate the result for cheking when the client responds
+      m_nHandshakeCheck = scramble(m_nHandshakeOut);
+    } else if (parent == owner::client) {
+      // Connection is Client -> Server, so we have nothing to define
+      m_nHandshakeIn = 0;
+      m_nHandshakeOut = 0;
+    }
   }
 
   virtual ~connection() {}
@@ -31,11 +49,21 @@ public:
   uint32_t GetID() const { return id; }
 
 public:
-  void ConnectToClient(uint32_t uid = 0) {
+  void ConnectToClient(olc::net::server_interface<T> *server,
+                       uint32_t uid = 0) {
     if (m_nOwnerType == owner::server) {
       if (m_socket.is_open()) {
         id = uid;
-        ReadHeader();
+        // ReadHeader(); not now, make validation
+
+        // A client has attempt to connect to the server, but we wish the client
+        // to first validate itself, so first write out the handshake data to be
+        // validated
+        WriteValidation();
+
+        // Next, issue a task to sit and wait asynchronously for precisely
+        // the validation data sent back from the client
+        ReadValidation(server);
       }
     }
   }
@@ -49,7 +77,11 @@ public:
           m_socket, endpoints,
           [this](std::error_code ec, boost::asio::ip::tcp::endpoint endpoint) {
             if (!ec) {
-              ReadHeader();
+              // ReadHeader(); - Not now, we will make validation
+
+              // First thing server will do is send packet to be validated
+              // so wait for that and respond
+              ReadValidation();
             }
           });
     }
@@ -230,6 +262,67 @@ private:
     ReadHeader();
   }
 
+  // "Encrypt" data
+  uint64_t scramble(uint64_t nInput) {
+    uint64_t out = nInput ^ 0xDEADBEEFC0DECAFE;
+    out = (out & 0xF0F0F0F0F0F0F0) >> 4 | (out & 0x0F0F0F0F0F0F0F) << 4;
+    return out ^ 0xC0DEFACE12345678;
+  }
+
+  // ASYNC - Used by both client and server to write validation packet
+  void WriteValidation() {
+    boost::asio::async_write(
+        m_socket, boost::asio::buffer(&m_nHandshakeOut, sizeof(uint64_t)),
+        [this](std::error_code ec, std::size_t length) {
+          if (!ec) {
+            // Validation data sent, clients should sit and wait
+            // for a response (or a closure)
+            if (m_nOwnerType == owner::client)
+              ReadHeader(); // we place that method here, cause we need start it
+                            // when we fully validate our client,
+            // so we will start it in the end of method WriteValidation in a
+            // callback function (that will srtart when async_write will get the
+            // data)
+
+          } else {
+            m_socket.close();
+          }
+        });
+  }
+
+  void ReadValidation(olc::net::server_interface<T> *server = nullptr) {
+    boost::asio::async_read(
+        m_socket, boost::asio::buffer(&m_nHandshakeIn, sizeof(uint64_t)),
+        [this, server](std::error_code ec, std::size_t length) {
+          if (!ec) {
+            if (m_nOwnerType == owner::server) {
+              if (m_nHandshakeIn == m_nHandshakeCheck) {
+                // Client has provided valid solution, so allow it to connection
+                std::cout << "Client Validated" << '\n';
+                server->OnClientValidated(this->shared_from_this());
+
+                // Sit waiting to receive data now
+                ReadHeader();
+              } else {
+                // Client gave incorrect data, so disconnect
+                std::cout << "Client Disconnected (Fail Validation)" << '\n';
+                m_socket.close();
+              }
+            } else {
+              // Connection is a client, so solve puzzle
+              m_nHandshakeOut = scramble(m_nHandshakeIn);
+
+              // Write the result
+              WriteValidation();
+            }
+          } else {
+            // Some biggerfailure occured
+            std::cout << "Client Disconnected (ReadValidation)" << '\n';
+            m_socket.close();
+          }
+        });
+  }
+
 protected:
   // Each connection has a unique socket to a remote
   boost::asio::ip::tcp::socket m_socket;
@@ -252,6 +345,11 @@ protected:
   owner m_nOwnerType = owner::server;
 
   uint32_t id = 0;
+
+  // Handshake Validation
+  uint64_t m_nHandshakeOut = 0;   // will send as result of scramble
+  uint64_t m_nHandshakeIn = 0;    // receive as data to scramble
+  uint64_t m_nHandshakeCheck = 0; // for server, will compare the client scramle
 };
 } // namespace net
 } // namespace olc
